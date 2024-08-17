@@ -14,6 +14,7 @@ export default class Pomosidian extends Plugin {
     private startTime: Date | null = null;
     private totalTime: number = 0;
     private statusBarItemEl: HTMLElement;
+	private timerFileName: string | null = null;
 
     async onload() {
         await this.loadSettings();
@@ -61,17 +62,16 @@ export default class Pomosidian extends Plugin {
 		}
 	
 		this.startTime = new Date();
+		const activeFile = this.app.workspace.getActiveFile();
+		this.timerFileName = activeFile ? activeFile.basename : "Unknown page"; // Store the file name
+	
 		this.timer = setInterval(() => {
 			const elapsedTime = this.formatTime((new Date().getTime() - this.startTime!.getTime()) / 1000);
-			const activeFile = this.app.workspace.getActiveFile();
-			const fileName = activeFile ? activeFile.basename : "Unknown page";
-			this.statusBarItemEl.setText(`⏸️ ${elapsedTime}`); // Display the elapsed time in the status bar
-			this.statusBarItemEl.setAttr('title', `Stop timer for ${fileName} (Running for ${elapsedTime})`);
+			this.statusBarItemEl.setText(`⏸️ ${elapsedTime} - ${this.timerFileName}`); // Use stored file name
+			this.statusBarItemEl.setAttr('title', `Stop timer for ${this.timerFileName} (Running for ${elapsedTime})`);
 		}, 1000); // Update every second
 	
-		const activeFile = this.app.workspace.getActiveFile();
-		const fileName = activeFile ? activeFile.basename : "Unknown page";
-		new Notice(`Timer started for ${fileName}.`);
+		new Notice(`Timer started for ${this.timerFileName}.`);
 	}
 	
 	async stopTimer() {
@@ -87,110 +87,124 @@ export default class Pomosidian extends Plugin {
 		const timeSpent = (endTime.getTime() - this.startTime!.getTime()) / 1000; // in seconds
 		this.totalTime += timeSpent;
 	
-		const activeFile = this.app.workspace.getActiveFile();
-		const fileName = activeFile ? activeFile.basename : "Unknown page";
+		// Use the stored timerFileName instead of the active file
+		const fileName = this.timerFileName || "Unknown page";
 		await this.logTimeSpent(this.startTime!, endTime);
 		this.statusBarItemEl.setText('🕑'); // Change icon back to 'play'
 		this.statusBarItemEl.setAttr('title', `Start timer for ${fileName}`);
 		new Notice(`Timer stopped for ${fileName}. Total time: ${this.formatTime(timeSpent)}`);
 	}
 
-
-	formatTime(seconds: number, total = false): string {
-		const hours = Math.floor(seconds / 3600);
-		const minutes = Math.floor((seconds % 3600) / 60);
+	async logTimeSpent(startTime: Date, endTime: Date) {
+		// Format the date and time manually to match the local timezone
+		const formatDateTime = (date: Date) => {
+			const year = date.getFullYear();
+			const month = (date.getMonth() + 1).toString().padStart(2, '0');
+			const day = date.getDate().toString().padStart(2, '0');
+			const hours = date.getHours().toString().padStart(2, '0');
+			const minutes = date.getMinutes().toString().padStart(2, '0');
+			const seconds = date.getSeconds().toString().padStart(2, '0');
+			return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+		};
 	
-		if (hours > 0) {
-			return minutes > 0 ? `${hours}h${minutes.toString().padStart(2, '0')}m` : `${hours}h`;
-		} else if (minutes > 0 || total) {
-			return `${minutes}m`;
-		}
-		return '';
-	}
-
-    async logTimeSpent(startTime: Date, endTime: Date) {
-		const startIcon = "⏱️"; // Icon for start
-		const stopIcon = "✅"; // Icon for stop
+		const durationSeconds = Math.floor((endTime.getTime() - startTime.getTime()) / 1000);
+		const durationFormatted = this.formatTime(durationSeconds); // Use the human-friendly format
 	
-		// Calculate the duration for this session
-		const duration = this.formatTime((endTime.getTime() - startTime.getTime()) / 1000);
+		// Construct the log entry as a single atomic line
+		const logEntry = ` ⏱️ ${formatDateTime(startTime)} - ${formatDateTime(endTime)} (${durationFormatted})`;
 	
-		let logEntry = `  ${stopIcon} Task stopped - _${endTime.toLocaleTimeString()} on ${endTime.toLocaleDateString()}_`;
-		if (duration) {
-			logEntry += ` (${duration})`;
-		}
-		logEntry += `\n  ${startIcon} Task started - _${startTime.toLocaleTimeString()} on ${startTime.toLocaleDateString()}_\n`;
+		// Find the file that the timer started on using this.timerFileName
+		const allFiles = this.app.vault.getFiles();
+		const targetFile = allFiles.find(file => file.basename === this.timerFileName);
 	
-		const activeFile = this.app.workspace.getActiveFile();
-		if (activeFile) {
-			const content = await this.app.vault.read(activeFile);
+		if (targetFile) {
+			let content = await this.app.vault.read(targetFile);
 	
-			// Regex to find the existing pomodoro_log block
-			const logBlockRegex = /pomodoro_log: \|\-\n([\s\S]*?)\n/m;
+			// Check if the file contains the front matter block
+			const frontMatterRegex = /^---\n([\s\S]*?)\n---/m;
+			const hasFrontMatter = frontMatterRegex.test(content);
+	
+			// Initialize or update the log entries
+			let existingLogEntries = [];
+			const logBlockRegex = /pomosidian_log: \|-\n([\s\S]*)/m;
 			const match = content.match(logBlockRegex);
 	
-			let existingLogEntries = [];
 			if (match) {
-				// Extract and parse existing log entries
-				existingLogEntries = match[1].trim().split('\n').filter(entry => entry.trim() !== '');
+				existingLogEntries = match[1].split('\n').filter(entry => entry.trim() !== '');
 			}
 	
-			// Append the new entry at the beginning to maintain chronological order
-			existingLogEntries.unshift(logEntry.trim());
+			// Append the new log entry to the existing log entries
+			existingLogEntries.unshift(logEntry);
 	
-			// Sort the entries chronologically
-			existingLogEntries.sort((a, b) => {
-				const dateA = new Date(a.match(/on (.*)/)![1]);
-				const dateB = new Date(b.match(/on (.*)/)![1]);
-				return dateA.getTime() - dateB.getTime();
-			});
+			// Join the entries with newlines between them
+			const updatedLog = existingLogEntries.join('\n');
 	
-			// Join the sorted entries into a single string with correct indentation
-			const updatedLog = existingLogEntries.map(entry => `  ${entry}`).join('\n');
-	
-			// Calculate the total time spent by parsing the log entries
+			// Calculate the total time from all log entries
 			const totalTimeSpentSeconds = this.calculateTotalTime(existingLogEntries);
-			const totalTimeSpent = this.formatTime(totalTimeSpentSeconds, true);
+			const totalTimeSpent = this.formatTime(totalTimeSpentSeconds);
 	
-			// Update the time_spent property or add it if it doesn't exist
-			const timeSpentRegex = /time_spent: .*/m;
-			let updatedContent;
-			if (timeSpentRegex.test(content)) {
-				updatedContent = content.replace(timeSpentRegex, `time_spent: ${totalTimeSpent}`);
+			if (hasFrontMatter) {
+				const timeSpentRegex = /time_spent: .*/m;
+				if (timeSpentRegex.test(content)) {
+					content = content.replace(timeSpentRegex, `time_spent: ${totalTimeSpent}`);
+				} else {
+					content = content.replace(frontMatterRegex, `---\n$1time_spent: ${totalTimeSpent}\n---`);
+				}
+	
+				if (match) {
+					content = content.replace(logBlockRegex, `pomosidian_log: |-\n${updatedLog}`);
+				} else {
+					content = content.replace(frontMatterRegex, `---\n$1pomosidian_log: |-\n${updatedLog}\n---`);
+				}
 			} else {
-				updatedContent = content.replace(/---\n([\s\S]*?)---/m, `---\n$1time_spent: ${totalTimeSpent}\n---`);
+				// Create the front matter block if it doesn't exist
+				content = `---\ntime_spent: ${totalTimeSpent}\npomosidian_log: |-\n${updatedLog}\n---\n\n${content}`;
 			}
 	
-			// Replace or append the pomodoro_log property within the properties block
-			updatedContent = updatedContent.replace(logBlockRegex, `pomodoro_log: |-\n${updatedLog}\n`) ||
-				updatedContent.replace(/---\n([\s\S]*?)---/m, `---\n$1pomodoro_log: |-\n${updatedLog}\n---`) ||
-				`---\npomodoro_log: |-\n${updatedLog}\n---\n\n${content}`;
-	
-			// Write the updated content back to the file
-			await this.app.vault.modify(activeFile, updatedContent);
+			await this.app.vault.modify(targetFile, content);
+		} else {
+			new Notice(`Could not find the file where the timer started (${this.timerFileName}).`);
 		}
 	}
 	
 	calculateTotalTime(logEntries: string[]): number {
+		console.log("Calculating total time from log entries: ", logEntries);
 		let totalSeconds = 0;
 	
-		for (let i = 0; i < logEntries.length; i += 2) {
-			const stopEntry = logEntries[i];
-			const startEntry = logEntries[i + 1];
+		logEntries.forEach(entry => {
+			// Extract the start and end times from the log entry
+			const timeMatch = entry.match(/⏱️ (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) - (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})/);
+			if (timeMatch) {
+				const startTime = new Date(timeMatch[1]).getTime();
+				const endTime = new Date(timeMatch[2]).getTime();
 	
-			const stopTimeMatch = stopEntry.match(/on (.*)/);
-			const startTimeMatch = startEntry?.match(/on (.*)/); // Use optional chaining to handle edge cases
-	
-			if (stopTimeMatch && startTimeMatch) {
-				const stopTime = new Date(stopTimeMatch[1]);
-				const startTime = new Date(startTimeMatch[1]);
-	
-				// Add the duration between start and stop times
-				totalSeconds += (stopTime.getTime() - startTime.getTime()) / 1000;
+				// Calculate the duration in seconds
+				const duration = (endTime - startTime) / 1000;
+				totalSeconds += duration;
 			}
-		}
+		});
 	
+		console.log("Final total time spent in seconds: ", totalSeconds);
 		return totalSeconds;
+	}
+	
+	formatTime(seconds: number): string {
+		seconds = Math.floor(seconds);
+		const hours = Math.floor(seconds / 3600);
+		const minutes = Math.floor((seconds % 3600) / 60);
+		const remainingSeconds = seconds % 60;
+	
+		if (hours > 0 && minutes > 0) {
+			return `${hours}h${minutes}m`;
+		} else if (hours > 0) {
+			return `${hours}h`;
+		} else if (minutes > 0 && remainingSeconds > 0) {
+			return `${minutes}m${remainingSeconds}s`;
+		} else if (minutes > 0) {
+			return `${minutes}m`;
+		} else {
+			return `${remainingSeconds}s`;
+		}
 	}
 	
 
@@ -198,7 +212,7 @@ export default class Pomosidian extends Plugin {
         const activeFile = this.app.workspace.getActiveFile();
         if (activeFile) {
             const content = await this.app.vault.read(activeFile); // Await the read operation
-            const pomodoroLogMatch = content.match(/pomodoro_log: \|\-[\s\S]*?(?=\n---)/m);
+            const pomodoroLogMatch = content.match(/pomosidian_log: \|\-[\s\S]*?(?=\n---)/m);
             return pomodoroLogMatch ? `\n\n${pomodoroLogMatch[0]}` : '';
         }
         return '';
