@@ -124,43 +124,42 @@ export default class Pomosidian extends Plugin {
 			const frontMatterRegex = /^---\n([\s\S]*?)\n---/m;
 			const hasFrontMatter = frontMatterRegex.test(content);
 	
-			// Initialize or update the log entries
-			let existingLogEntries = [];
-			const logBlockRegex = /pomosidian_log: \|-\n([\s\S]*)/m;
-			const match = content.match(logBlockRegex);
-	
-			if (match) {
-				existingLogEntries = match[1].split('\n').filter(entry => entry.trim() !== '');
-			}
-	
-			// Append the new log entry to the existing log entries
-			existingLogEntries.unshift(logEntry);
-	
-			// Join the entries with newlines between them
-			const updatedLog = existingLogEntries.join('\n');
-	
-			// Calculate the total time from all log entries
-			const totalTimeSpentSeconds = this.calculateTotalTime(existingLogEntries);
-			const totalTimeSpent = this.formatTime(totalTimeSpentSeconds);
-	
+			let updatedFrontMatter = "";
 			if (hasFrontMatter) {
+				// Extract the existing front matter
+				const frontMatterMatch = content.match(frontMatterRegex);
+				const existingFrontMatter = frontMatterMatch ? frontMatterMatch[1] : '';
+	
+				// Prepare to update time_spent and pomosidian_log
 				const timeSpentRegex = /time_spent: .*/m;
-				if (timeSpentRegex.test(content)) {
-					content = content.replace(timeSpentRegex, `time_spent: ${totalTimeSpent}`);
+				const logBlockRegex = /pomosidian_log: \|-\n([\s\S]*)/m;
+	
+				// Update or add time_spent
+				const totalTimeSpentSeconds = this.calculateTotalTime([logEntry]);
+				const totalTimeSpent = this.formatTime(totalTimeSpentSeconds);
+	
+				if (timeSpentRegex.test(existingFrontMatter)) {
+					updatedFrontMatter = existingFrontMatter.replace(timeSpentRegex, `time_spent: ${totalTimeSpent}`);
 				} else {
-					content = content.replace(frontMatterRegex, `---\n$1time_spent: ${totalTimeSpent}\n---`);
+					updatedFrontMatter = existingFrontMatter + `\ntime_spent: ${totalTimeSpent}`;
 				}
 	
-				if (match) {
-					content = content.replace(logBlockRegex, `pomosidian_log: |-\n${updatedLog}`);
+				// Update or add pomosidian_log
+				if (logBlockRegex.test(existingFrontMatter)) {
+					updatedFrontMatter = updatedFrontMatter.replace(logBlockRegex, `pomosidian_log: |-\n${logEntry}\n$1`);
 				} else {
-					content = content.replace(frontMatterRegex, `---\n$1pomosidian_log: |-\n${updatedLog}\n---`);
+					updatedFrontMatter = updatedFrontMatter + `\npomosidian_log: |-\n${logEntry}`;
 				}
+	
+				// Reconstruct the content
+				content = content.replace(frontMatterRegex, `---\n${updatedFrontMatter.trim()}\n---`);
 			} else {
 				// Create the front matter block if it doesn't exist
-				content = `---\ntime_spent: ${totalTimeSpent}\npomosidian_log: |-\n${updatedLog}\n---\n\n${content}`;
+				updatedFrontMatter = `time_spent: ${durationFormatted}\npomosidian_log: |-\n${logEntry}`;
+				content = `---\n${updatedFrontMatter}\n---\n\n${content.trim()}`;
 			}
 	
+			// Save the modified content back to the file
 			await this.app.vault.modify(targetFile, content);
 		} else {
 			new Notice(`Could not find the file where the timer started (${this.timerFileName}).`);
